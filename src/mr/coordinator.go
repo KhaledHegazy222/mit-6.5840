@@ -19,27 +19,73 @@ type Coordinator struct {
 // Your code here -- RPC handlers for the worker to call.
 
 func (c *Coordinator) getNextPendingTask() Task {
-	for idx, t := range c.tasks {
-		t.mu.Lock()
-		if t.Status == StatusPending {
-			// NOTE: Marking task as in progress
-			// till we either mark it as success or timeout (return it back to pending)
-			c.tasks[idx].Status = StatusInProgress
-			t.mu.Unlock()
-			go func(idx int) {
-				time.Sleep(time.Second * 10)
-				c.tasks[idx].mu.Lock()
-				defer c.tasks[idx].mu.Unlock()
-				if c.tasks[idx].Status != StatusFinished {
-					c.tasks[idx].Status = StatusPending
+	// Try to find a task with a desired status and update it atomically
+	acquireTask := func(taskType TaskType, statuses []TaskStatus) (Task, bool) {
+		for idx := range c.tasks {
+			t := &c.tasks[idx]
+			if t.TaskType != taskType {
+				continue
+			}
+			t.mu.Lock()
+			for _, s := range statuses {
+				if t.Status != s {
+					continue
 				}
-			}(idx)
-			return t
+				// Mark as in progress
+				t.Status = StatusInProgress
+				t.mu.Unlock()
+
+				// Start timeout watcher
+				go c.watchTaskTimeout(idx)
+				return *t, true
+			}
+			t.mu.Unlock()
 		}
-		t.mu.Unlock()
+		return Task{}, false
 	}
-	return Task{
-		TaskType: TypeExit,
+
+	searchListPreference := []struct {
+		taskType   TaskType
+		taskStatus []TaskStatus
+	}{
+		{
+			taskType:   TypeMap,
+			taskStatus: []TaskStatus{StatusPending},
+		},
+		{
+			taskType:   TypeMap,
+			taskStatus: []TaskStatus{StatusPending, StatusInProgress},
+		},
+		{
+			taskType:   TypeReduce,
+			taskStatus: []TaskStatus{StatusPending},
+		},
+		{
+			taskType:   TypeReduce,
+			taskStatus: []TaskStatus{StatusPending, StatusInProgress},
+		},
+	}
+
+	for _, prefernce := range searchListPreference {
+		if task, ok := acquireTask(prefernce.taskType, prefernce.taskStatus); ok {
+			return task
+		}
+	}
+
+	// Otherwise signal no work left
+	return Task{TaskType: TypeExit}
+}
+
+// Separate timeout watcher
+func (c *Coordinator) watchTaskTimeout(idx int) {
+	time.Sleep(10 * time.Second)
+	t := &c.tasks[idx]
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.Status != StatusFinished {
+		t.Status = StatusPending
 	}
 }
 

@@ -3,10 +3,13 @@ package mr
 import (
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log"
+	"math/rand"
 	"net/rpc"
 	"os"
 	"sort"
+	"time"
 )
 
 // Map functions return a slice of KeyValue.
@@ -31,6 +34,20 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+func init() {
+	rand.New(rand.NewSource(time.Now().UnixNano()))
+}
+
+var letterRunes = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+func RandStringRunes(n int) string {
+	b := make([]rune, n)
+	for i := range b {
+		b[i] = letterRunes[rand.Intn(len(letterRunes))]
+	}
+	return string(b)
+}
+
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string,
@@ -46,14 +63,14 @@ func Worker(mapf func(string, string) []KeyValue,
 			return
 		}
 
+		randomStr := RandStringRunes(10)
 		filesWriter := make([]*os.File, 0, len(t.Output))
 		for _, outputFile := range t.Output {
-			f, err := os.OpenFile(outputFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+			f, err := os.OpenFile(outputFile+randomStr, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 			if err != nil {
 				log.Fatal(err)
 			}
 			filesWriter = append(filesWriter, f)
-			defer f.Close()
 		}
 		switch t.TaskType {
 		case TypeMap:
@@ -77,9 +94,12 @@ func Worker(mapf func(string, string) []KeyValue,
 				}
 				for {
 					kv := KeyValue{}
-					b, err := fmt.Fscanf(f, "%v %v", &kv.Key, &kv.Value)
-					if b == 0 || err != nil {
+					_, err := fmt.Fscanf(f, "%v %v", &kv.Key, &kv.Value)
+					if err == io.EOF {
 						break
+					}
+					if err != nil {
+						log.Fatal(err)
 					}
 					content = append(content, kv)
 				}
@@ -102,7 +122,12 @@ func Worker(mapf func(string, string) []KeyValue,
 				fmt.Fprintf(filesWriter[0], "%v %v\n", content[i].Key, output)
 				i = j
 			}
-
+		}
+		for idx := range filesWriter {
+			f := filesWriter[idx]
+			outputFile := t.Output[idx]
+			os.Rename(outputFile+randomStr, outputFile)
+			f.Close()
 		}
 		MarkFinshed(t.Idx)
 	}
