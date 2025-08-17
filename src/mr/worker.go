@@ -1,77 +1,162 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
+import (
+	"fmt"
+	"hash/fnv"
+	"log"
+	"net/rpc"
+	"os"
+	"sort"
+)
 
-
-//
 // Map functions return a slice of KeyValue.
-//
 type KeyValue struct {
 	Key   string
 	Value string
 }
 
-//
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
+
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
-//
 func ihash(key string) int {
 	h := fnv.New32a()
 	h.Write([]byte(key))
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
-//
 // main/mrworker.go calls this function.
-//
 func Worker(mapf func(string, string) []KeyValue,
-	reducef func(string, []string) string) {
-
+	reducef func(string, []string) string,
+) {
 	// Your worker implementation here.
 
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+	for {
+		t, err := FetchTask()
+		if err != nil {
+			log.Fatalf("Unexpected Err: %s", err)
+		}
+		if t.TaskType == TypeExit {
+			return
+		}
 
+		filesWriter := make([]*os.File, 0, len(t.Output))
+		for _, outputFile := range t.Output {
+			f, err := os.OpenFile(outputFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+			if err != nil {
+				log.Fatal(err)
+			}
+			filesWriter = append(filesWriter, f)
+			defer f.Close()
+		}
+		switch t.TaskType {
+		case TypeMap:
+			inputFile := t.Input[0]
+			content, err := os.ReadFile(inputFile)
+			if err != nil {
+				log.Fatalf("can't open such file (%s), err: %s", inputFile, err)
+			}
+			mapResult := mapf(inputFile, string(content))
+			for _, kvPair := range mapResult {
+				bucket := ihash(kvPair.Key) % len(t.Output)
+				fmt.Fprintf(filesWriter[bucket], "%v %v\n", kvPair.Key, kvPair.Value)
+			}
+
+		case TypeReduce:
+			content := []KeyValue{}
+			for _, inputFile := range t.Input {
+				f, err := os.OpenFile(inputFile, os.O_RDONLY, 0644)
+				if err != nil {
+					log.Fatal(err)
+				}
+				for {
+					kv := KeyValue{}
+					b, err := fmt.Fscanf(f, "%v %v", &kv.Key, &kv.Value)
+					if b == 0 || err != nil {
+						break
+					}
+					content = append(content, kv)
+				}
+				f.Close()
+			}
+			sort.Sort(ByKey(content))
+			i := 0
+			for i < len(content) {
+				j := i + 1
+				for j < len(content) && content[j].Key == content[i].Key {
+					j++
+				}
+				values := []string{}
+				for k := i; k < j; k++ {
+					values = append(values, content[k].Value)
+				}
+				output := reducef(content[i].Key, values)
+
+				// this is the correct format for each line of Reduce output.
+				fmt.Fprintf(filesWriter[0], "%v %v\n", content[i].Key, output)
+				i = j
+			}
+
+		}
+		MarkFinshed(t.Idx)
+	}
 }
 
-//
-// example function to show how to make an RPC call to the coordinator.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func CallExample() {
-
+func FetchTask() (Task, error) {
 	// declare an argument structure.
-	args := ExampleArgs{}
+	args := FetchTaskArgs{}
 
-	// fill in the argument(s).
-	args.X = 99
+	// // fill in the argument(s).
+	// args.X = 99
 
 	// declare a reply structure.
-	reply := ExampleReply{}
+	reply := FetchTaskReply{}
 
 	// send the RPC request, wait for the reply.
 	// the "Coordinator.Example" tells the
 	// receiving server that we'd like to call
 	// the Example() method of struct Coordinator.
-	ok := call("Coordinator.Example", &args, &reply)
+	ok := call("Coordinator.FetchTask", &args, &reply)
 	if ok {
-		// reply.Y should be 100.
-		fmt.Printf("reply.Y %v\n", reply.Y)
+		return reply.Task, nil
 	} else {
-		fmt.Printf("call failed!\n")
+		return Task{}, fmt.Errorf("RPC Call Failed")
 	}
 }
 
-//
+func MarkFinshed(idx int) error {
+	// declare an argument structure.
+	args := MarkFinishedArgs{
+		Idx: idx,
+	}
+
+	// // fill in the argument(s).
+	// args.X = 99
+
+	// declare a reply structure.
+	reply := MarkFinishedReply{}
+
+	// send the RPC request, wait for the reply.
+	// the "Coordinator.Example" tells the
+	// receiving server that we'd like to call
+	// the Example() method of struct Coordinator.
+	ok := call("Coordinator.MarkFinished", &args, &reply)
+	if ok {
+		return nil
+	} else {
+		return fmt.Errorf("RPC Call Failed")
+	}
+}
+
 // send an RPC request to the coordinator, wait for the response.
 // usually returns true.
 // returns false if something goes wrong.
-//
 func call(rpcname string, args interface{}, reply interface{}) bool {
 	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	sockname := coordinatorSock()
