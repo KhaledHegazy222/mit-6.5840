@@ -62,11 +62,14 @@ func Worker(mapf func(string, string) []KeyValue,
 		if t.TaskType == TypeExit {
 			return
 		}
+		if t.TaskType == TypeWait {
+			continue
+		}
 
 		randomStr := RandStringRunes(10)
 		filesWriter := make([]*os.File, 0, len(t.Output))
 		for _, outputFile := range t.Output {
-			f, err := os.OpenFile(outputFile+randomStr, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+			f, err := os.OpenFile("temp-"+randomStr+outputFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -126,8 +129,14 @@ func Worker(mapf func(string, string) []KeyValue,
 		for idx := range filesWriter {
 			f := filesWriter[idx]
 			outputFile := t.Output[idx]
-			os.Rename(outputFile+randomStr, outputFile)
-			f.Close()
+			err := f.Close()
+			if err != nil {
+				log.Fatalf("Unexpected Error: %v", err)
+			}
+			err = os.Rename("temp-"+randomStr+outputFile, outputFile)
+			if err != nil {
+				log.Fatalf("Unexpected Error: %v", err)
+			}
 		}
 		MarkFinshed(t.Idx)
 	}

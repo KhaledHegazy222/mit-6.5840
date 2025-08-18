@@ -26,6 +26,7 @@ type TaskType int
 const (
 	TypeMap TaskType = iota
 	TypeReduce
+	TypeWait
 	TypeExit
 )
 

@@ -44,35 +44,46 @@ func (c *Coordinator) getNextPendingTask() Task {
 		return Task{}, false
 	}
 
-	searchListPreference := []struct {
-		taskType   TaskType
-		taskStatus []TaskStatus
-	}{
-		{
-			taskType:   TypeMap,
-			taskStatus: []TaskStatus{StatusPending},
-		},
-		{
-			taskType:   TypeMap,
-			taskStatus: []TaskStatus{StatusPending, StatusInProgress},
-		},
-		{
-			taskType:   TypeReduce,
-			taskStatus: []TaskStatus{StatusPending},
-		},
-		{
-			taskType:   TypeReduce,
-			taskStatus: []TaskStatus{StatusPending, StatusInProgress},
-		},
+	// searchListPreference := []struct {
+	// 	taskType   TaskType
+	// 	taskStatus []TaskStatus
+	// }{
+	// 	{
+	// 		taskType:   TypeMap,
+	// 		taskStatus: []TaskStatus{StatusPending},
+	// 	},
+	// 	{
+	// 		taskType:   TypeMap,
+	// 		taskStatus: []TaskStatus{StatusPending, StatusInProgress},
+	// 	},
+	// 	{
+	// 		taskType:   TypeReduce,
+	// 		taskStatus: []TaskStatus{StatusPending},
+	// 	},
+	// 	{
+	// 		taskType:   TypeReduce,
+	// 		taskStatus: []TaskStatus{StatusPending, StatusInProgress},
+	// 	},
+	// }
+
+	// Prefer a "Pending" task first
+	if task, ok := acquireTask(TypeMap, []TaskStatus{StatusPending}); ok {
+		return task
 	}
 
-	for _, prefernce := range searchListPreference {
-		if task, ok := acquireTask(prefernce.taskType, prefernce.taskStatus); ok {
-			return task
-		}
+	// Fallback: also allow "InProgress" if nothing Pending
+	if _, ok := acquireTask(TypeMap, []TaskStatus{StatusInProgress}); ok {
+		return Task{TaskType: TypeWait}
 	}
 
-	// Otherwise signal no work left
+	// Prefer a "Pending" task first
+	if task, ok := acquireTask(TypeReduce, []TaskStatus{StatusPending}); ok {
+		return task
+	}
+	// Fallback: also allow "InProgress" if nothing Pending
+	if task, ok := acquireTask(TypeReduce, []TaskStatus{StatusPending, StatusInProgress}); ok {
+		return task
+	}
 	return Task{TaskType: TypeExit}
 }
 
@@ -96,7 +107,6 @@ func (c *Coordinator) FetchTask(args *FetchTaskArgs, reply *FetchTaskReply) erro
 }
 
 func (c *Coordinator) MarkFinished(args *MarkFinishedArgs, reply *MarkFinishedReply) error {
-	log.Printf("Task FINISHED: %d", args.Idx)
 	c.tasks[args.Idx].mu.Lock()
 	c.tasks[args.Idx].Status = StatusFinished
 	c.tasks[args.Idx].mu.Unlock()
