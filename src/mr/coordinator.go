@@ -19,71 +19,53 @@ type Coordinator struct {
 // Your code here -- RPC handlers for the worker to call.
 
 func (c *Coordinator) getNextPendingTask() Task {
-	// Try to find a task with a desired status and update it atomically
-	acquireTask := func(taskType TaskType, statuses []TaskStatus) (Task, bool) {
+	// Lock the whole table
+	for _, t := range c.tasks {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+	}
+
+	lookupTask := func(taskType TaskType, statuses []TaskStatus) (Task, bool) {
 		for idx := range c.tasks {
 			t := &c.tasks[idx]
 			if t.TaskType != taskType {
 				continue
 			}
-			t.mu.Lock()
 			for _, s := range statuses {
 				if t.Status != s {
 					continue
 				}
 				// Mark as in progress
 				t.Status = StatusInProgress
-				t.mu.Unlock()
 
 				// Start timeout watcher
 				go c.watchTaskTimeout(idx)
 				return *t, true
 			}
-			t.mu.Unlock()
 		}
 		return Task{}, false
 	}
 
-	// searchListPreference := []struct {
-	// 	taskType   TaskType
-	// 	taskStatus []TaskStatus
-	// }{
-	// 	{
-	// 		taskType:   TypeMap,
-	// 		taskStatus: []TaskStatus{StatusPending},
-	// 	},
-	// 	{
-	// 		taskType:   TypeMap,
-	// 		taskStatus: []TaskStatus{StatusPending, StatusInProgress},
-	// 	},
-	// 	{
-	// 		taskType:   TypeReduce,
-	// 		taskStatus: []TaskStatus{StatusPending},
-	// 	},
-	// 	{
-	// 		taskType:   TypeReduce,
-	// 		taskStatus: []TaskStatus{StatusPending, StatusInProgress},
-	// 	},
-	// }
-
-	// Prefer a "Pending" task first
-	if task, ok := acquireTask(TypeMap, []TaskStatus{StatusPending}); ok {
+	// Prefer only pending map task first
+	if task, ok := lookupTask(TypeMap, []TaskStatus{StatusPending}); ok {
 		return task
 	}
 
-	// Fallback: also allow "InProgress" if nothing Pending
-	if _, ok := acquireTask(TypeMap, []TaskStatus{StatusInProgress}); ok {
+	// if all map tasks are in progress then wait
+	if _, ok := lookupTask(TypeMap, []TaskStatus{StatusInProgress}); ok {
 		return Task{TaskType: TypeWait}
 	}
 
-	// Prefer a "Pending" task first
-	if task, ok := acquireTask(TypeReduce, []TaskStatus{StatusPending}); ok {
+	// otherwise start executing reduce tasks
+	if task, ok := lookupTask(TypeReduce, []TaskStatus{StatusPending}); ok {
 		return task
 	}
-	// Fallback: also allow "InProgress" if nothing Pending
-	if task, ok := acquireTask(TypeReduce, []TaskStatus{StatusPending, StatusInProgress}); ok {
+	// if no pending task found run the same tasks multiple time (Backup tasks)
+	if task, ok := lookupTask(TypeReduce, []TaskStatus{StatusInProgress}); ok {
 		return task
 	}
+
+	// otherwise all tasks are completed (shutdown client)
 	return Task{TaskType: TypeExit}
 }
 

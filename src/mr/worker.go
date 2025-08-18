@@ -49,95 +49,40 @@ func RandStringRunes(n int) string {
 }
 
 // main/mrworker.go calls this function.
-func Worker(mapf func(string, string) []KeyValue,
+
+func Worker(
+	mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string,
 ) {
-	// Your worker implementation here.
-
 	for {
 		t, err := FetchTask()
 		if err != nil {
-			log.Fatalf("Unexpected Err: %s", err)
-		}
-		if t.TaskType == TypeExit {
-			return
-		}
-		if t.TaskType == TypeWait {
-			continue
+			log.Fatalf("unexpected error fetching task: %v", err)
 		}
 
-		randomStr := RandStringRunes(10)
-		filesWriter := make([]*os.File, 0, len(t.Output))
-		for _, outputFile := range t.Output {
-			f, err := os.OpenFile("temp-"+randomStr+outputFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
-			if err != nil {
-				log.Fatal(err)
-			}
-			filesWriter = append(filesWriter, f)
-		}
 		switch t.TaskType {
+		case TypeExit:
+			return
+
+		case TypeWait:
+			time.Sleep(100 * time.Millisecond) // backoff instead of busy-spin
+			continue
+
 		case TypeMap:
-			inputFile := t.Input[0]
-			content, err := os.ReadFile(inputFile)
-			if err != nil {
-				log.Fatalf("can't open such file (%s), err: %s", inputFile, err)
-			}
-			mapResult := mapf(inputFile, string(content))
-			for _, kvPair := range mapResult {
-				bucket := ihash(kvPair.Key) % len(t.Output)
-				fmt.Fprintf(filesWriter[bucket], "%v %v\n", kvPair.Key, kvPair.Value)
+			if err := handleMapTask(t, mapf); err != nil {
+				log.Fatalf("map task failed: %v", err)
 			}
 
 		case TypeReduce:
-			content := []KeyValue{}
-			for _, inputFile := range t.Input {
-				f, err := os.OpenFile(inputFile, os.O_RDONLY, 0644)
-				if err != nil {
-					log.Fatal(err)
-				}
-				for {
-					kv := KeyValue{}
-					_, err := fmt.Fscanf(f, "%v %v", &kv.Key, &kv.Value)
-					if err == io.EOF {
-						break
-					}
-					if err != nil {
-						log.Fatal(err)
-					}
-					content = append(content, kv)
-				}
-				f.Close()
+			if err := handleReduceTask(t, reducef); err != nil {
+				log.Fatalf("reduce task failed: %v", err)
 			}
-			sort.Sort(ByKey(content))
-			i := 0
-			for i < len(content) {
-				j := i + 1
-				for j < len(content) && content[j].Key == content[i].Key {
-					j++
-				}
-				values := []string{}
-				for k := i; k < j; k++ {
-					values = append(values, content[k].Value)
-				}
-				output := reducef(content[i].Key, values)
 
-				// this is the correct format for each line of Reduce output.
-				fmt.Fprintf(filesWriter[0], "%v %v\n", content[i].Key, output)
-				i = j
-			}
+		default:
+			log.Fatalf("unknown task type: %v", t.TaskType)
 		}
-		for idx := range filesWriter {
-			f := filesWriter[idx]
-			outputFile := t.Output[idx]
-			err := f.Close()
-			if err != nil {
-				log.Fatalf("Unexpected Error: %v", err)
-			}
-			err = os.Rename("temp-"+randomStr+outputFile, outputFile)
-			if err != nil {
-				log.Fatalf("Unexpected Error: %v", err)
-			}
-		}
+
+		// mark task complete
 		MarkFinshed(t.Idx)
 	}
 }
@@ -186,6 +131,107 @@ func MarkFinshed(idx int) error {
 	} else {
 		return fmt.Errorf("RPC Call Failed")
 	}
+}
+
+func createTempWriters(outputs []string) ([]*os.File, string, error) {
+	randomStr := RandStringRunes(10)
+	files := make([]*os.File, len(outputs))
+
+	for i, outputFile := range outputs {
+		tempName := "temp-" + randomStr + outputFile
+		f, err := os.OpenFile(tempName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+		if err != nil {
+			return nil, "", err
+		}
+		files[i] = f
+	}
+	return files, randomStr, nil
+}
+
+func finalizeFiles(files []*os.File, outputs []string, prefix string) error {
+	for i, f := range files {
+		if err := f.Close(); err != nil {
+			return err
+		}
+		tempName := "temp-" + prefix + outputs[i]
+		if err := os.Rename(tempName, outputs[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func handleMapTask(t Task, mapf func(string, string) []KeyValue) error {
+	files, randStr, err := createTempWriters(t.Output)
+	if err != nil {
+		return err
+	}
+	defer finalizeFiles(files, t.Output, randStr)
+
+	inputFile := t.Input[0]
+	content, err := os.ReadFile(inputFile)
+	if err != nil {
+		return fmt.Errorf("reading input file %s: %w", inputFile, err)
+	}
+
+	kvs := mapf(inputFile, string(content))
+	for _, kv := range kvs {
+		bucket := ihash(kv.Key) % len(t.Output)
+		if _, err := fmt.Fprintf(files[bucket], "%v %v\n", kv.Key, kv.Value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func handleReduceTask(t Task, reducef func(string, []string) string) error {
+	files, randStr, err := createTempWriters(t.Output)
+	if err != nil {
+		return err
+	}
+	defer finalizeFiles(files, t.Output, randStr)
+
+	var kvs []KeyValue
+	for _, inputFile := range t.Input {
+		f, err := os.Open(inputFile)
+		if err != nil {
+			return fmt.Errorf("open reduce input %s: %w", inputFile, err)
+		}
+
+		for {
+			var kv KeyValue
+			_, err := fmt.Fscanf(f, "%v %v", &kv.Key, &kv.Value)
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				f.Close()
+				return fmt.Errorf("reading %s: %w", inputFile, err)
+			}
+			kvs = append(kvs, kv)
+		}
+		f.Close()
+	}
+
+	sort.Sort(ByKey(kvs))
+	for i := 0; i < len(kvs); {
+		j := i + 1
+		for j < len(kvs) && kvs[j].Key == kvs[i].Key {
+			j++
+		}
+		values := make([]string, j-i)
+		for k := i; k < j; k++ {
+			values[k-i] = kvs[k].Value
+		}
+		output := reducef(kvs[i].Key, values)
+
+		if _, err := fmt.Fprintf(files[0], "%v %v\n", kvs[i].Key, output); err != nil {
+			return err
+		}
+		i = j
+	}
+
+	return nil
 }
 
 // send an RPC request to the coordinator, wait for the response.
