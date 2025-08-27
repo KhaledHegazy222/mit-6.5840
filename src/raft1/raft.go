@@ -84,7 +84,8 @@ func (rf *Raft) GetState() (int, bool) {
 	// Your code here (3A).
 	rf.mu.RLock()
 	defer rf.mu.RUnlock()
-	isleader := rf.currentRole == RoleLeader
+	isleader := rf.leaderId == rf.me
+	// isleader := rf.currentRole == RoleLeader
 	return rf.currentTerm, isleader
 }
 
@@ -167,14 +168,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 
 	if args.Term < rf.currentTerm {
-		DPrintf("0 i: %d, reject from: %d ", rf.me, args.CandidateId)
 		reply.Term = rf.currentTerm
 		return
 	}
 
 	// reject voting if voted for another this term
 	if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
-		DPrintf("i: %d, reject from: %d voted to (%d)", rf.me, args.CandidateId, rf.votedFor)
 		reply.VoteGranted = false
 		return
 	}
@@ -188,14 +187,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// grant vote
 	if args.LastLogTerm > myLastLogTerm || (args.LastLogTerm == myLastLogTerm && args.LastLogIndex >= myLastLogIndex) {
 
-		DPrintf("i: %d, accept from: %d ", rf.me, args.CandidateId)
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 		reply.Term = args.Term
 		return
 	}
 
-	DPrintf("2 i: %d, reject from: %d ", rf.me, args.CandidateId)
 	reply.VoteGranted = false
 	reply.Term = rf.currentTerm // TODO: this might change later
 }
@@ -254,16 +251,13 @@ func (rf *Raft) sendRequestVoteToServer(ctx context.Context, idx int, ch chan Re
 		select {
 		case <-ctx.Done():
 			// stop retrying if context is cancelled or times out
-			DPrintf("I: %d, to: %d TIMEOUT/CTX CANCELLED", rf.me, idx)
 			return
 		default:
 			ok := rf.sendRequestVote(idx, &args, &reply)
 			if !ok {
-				// DPrintf("I: %d, to: %d RETRYING>>>>>", rf.me, idx)
 				time.Sleep(time.Millisecond * RPC_RETRY_INTERVAL)
 				continue
 			}
-			// DPrintf("I: %d, to: %d Done>>>>>", rf.me, idx)
 			ch <- reply
 		}
 	}
@@ -403,9 +397,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	// DPrintf("I: %d, to %d SENDING...", rf.me, server)
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	// DPrintf("I: %d, to %d RESPONED...", rf.me, server)
 	return ok
 }
 
@@ -538,9 +530,7 @@ func (rf *Raft) ticker() {
 		rf.mu.RUnlock()
 
 		if isCandidate {
-			DPrintf("New ELECTIONS %d", rf.me)
 			rf.startElections()
-			DPrintf("Done ELECTIONS %d", rf.me)
 		}
 
 		// pause for a random amount of time between 50 and 350
@@ -560,7 +550,6 @@ func (rf *Raft) checkTimeout() {
 			// if no heartbeat received till it timed out
 			rf.mu.Lock()
 			if rf.currentRole == RoleFollower {
-				DPrintf("PROMOTE to candidate %d", rf.me)
 				rf.currentRole = RoleCandidate
 			}
 			rf.mu.Unlock()
